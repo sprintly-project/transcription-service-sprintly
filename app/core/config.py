@@ -18,9 +18,14 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     worker_concurrency: int = 3
+    worker_poll_interval_seconds: float = 1.0
+    shutdown_grace_seconds: float = 30.0
     job_target_seconds: int = 180
     job_max_attempts: int = 3
+    job_lease_seconds: int = 300
+    outbox_poll_interval_seconds: float = 1.0
     pipeline_version: str = "v1"
+    summary_chunk_size: int = 12_000
 
     postgres_host_port: str | None = None
     postgres_host: str
@@ -58,6 +63,7 @@ class Settings(BaseSettings):
     max_pdf_pages: int = 500
     max_media_duration_seconds: int = 3600
     max_media_file_size_mb: int = 200
+    stt_chunk_seconds: int = 600
     api_request_timeout_seconds: int = 120
 
 

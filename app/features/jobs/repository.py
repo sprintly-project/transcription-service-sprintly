@@ -117,6 +117,23 @@ class JobsRepository:
         )
         return result.rowcount == 1
 
+    async def update_stage_and_extend_lease(
+        self, job_id: str, stage: JobStage, lease_for: timedelta
+    ) -> bool:
+        """Фиксирует этап и продлевает аренду job перед долгой операцией."""
+        result = await self._session.execute(
+            update(TranscriptionJob)
+            .where(
+                TranscriptionJob.job_id == job_id,
+                TranscriptionJob.status == JobStatus.PROCESSING.value,
+            )
+            .values(
+                current_stage=stage.value,
+                locked_until=datetime.now(UTC) + lease_for,
+            )
+        )
+        return result.rowcount == 1
+
     async def move_to_retry_wait(
         self,
         job_id: str,
@@ -220,6 +237,21 @@ class JobsRepository:
                 status=OutboxStatus.PUBLISHED.value,
                 published_at=datetime.now(UTC),
                 next_retry_at=None,
+            )
+        )
+        return result.rowcount == 1
+
+    async def schedule_outbox_retry(self, event_id: str, *, retry_at: datetime) -> bool:
+        """Откладывает повторную публикацию, сохраняя pending-статус события."""
+        result = await self._session.execute(
+            update(OutboxEvent)
+            .where(
+                OutboxEvent.id == event_id,
+                OutboxEvent.status == OutboxStatus.PENDING.value,
+            )
+            .values(
+                attempt_count=OutboxEvent.attempt_count + 1,
+                next_retry_at=retry_at,
             )
         )
         return result.rowcount == 1
