@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from time import monotonic
 from typing import Protocol
 
 import yt_dlp
 
 from app.core.exceptions import ContentError, TransientExternalError
 from app.features.extraction.base import ExtractionResult
-
-logger = logging.getLogger(__name__)
 
 
 class AudioPipeline(Protocol):
@@ -28,11 +26,32 @@ class AudioDownloader(Protocol):
 class YtDlpAudioDownloader:
     """Минимальная обёртка над yt-dlp без cookies, прокси и обходов доступа."""
 
+    def __init__(self, max_file_size_bytes: int, timeout_seconds: int) -> None:
+        self._max_file_size_bytes = max_file_size_bytes
+        self._timeout_seconds = timeout_seconds
+
     async def download(self, source_url: str, destination: Path) -> Path:
-        return await asyncio.to_thread(self._download, source_url, destination)
+        return await asyncio.to_thread(
+            self._download,
+            source_url,
+            destination,
+            self._max_file_size_bytes,
+            self._timeout_seconds,
+        )
 
     @staticmethod
-    def _download(source_url: str, destination: Path) -> Path:
+    def _download(
+        source_url: str,
+        destination: Path,
+        max_file_size_bytes: int,
+        timeout_seconds: int,
+    ) -> Path:
+        deadline = monotonic() + timeout_seconds
+
+        def stop_after_deadline(_: dict[str, object]) -> None:
+            if monotonic() >= deadline:
+                raise yt_dlp.utils.DownloadError("download timed out")
+
         options: dict[str, object] = {
             "format": "bestaudio",
             "outtmpl": str(destination / "audio.%(ext)s"),
@@ -40,12 +59,21 @@ class YtDlpAudioDownloader:
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
+            "max_filesize": max_file_size_bytes,
+            "socket_timeout": min(timeout_seconds, 60),
+            "retries": 2,
+            "fragment_retries": 2,
+            "progress_hooks": [stop_after_deadline],
         }
         try:
             with yt_dlp.YoutubeDL(options) as downloader:
                 info = downloader.extract_info(source_url, download=True)
                 requested_downloads = info.get("requested_downloads") or []
-                filename = requested_downloads[0].get("filepath") if requested_downloads else None
+                filename = (
+                    requested_downloads[0].get("filepath")
+                    if requested_downloads
+                    else None
+                )
                 output = Path(filename or downloader.prepare_filename(info))
         except yt_dlp.utils.DownloadError as error:
             raise YtDlpAudioDownloader._mapped_download_error(error) from error
@@ -74,7 +102,6 @@ class YtDlpAudioDownloader:
                 "Сервис YouTube временно недоступен. Попробуйте позже.",
             )
 
-        logger.info("YouTube audio is unavailable: %s", error)
         return ContentError(
             "source_unavailable",
             "Аудиодорожка ролика YouTube недоступна для обработки.",
@@ -88,13 +115,24 @@ class YoutubeExtractor:
         self,
         audio_pipeline: AudioPipeline,
         downloader: AudioDownloader | None = None,
-        temporary_directory: Callable[..., tempfile.TemporaryDirectory[str]] = tempfile.TemporaryDirectory,
+        *,
+        max_file_size_bytes: int = 200 * 1024 * 1024,
+        download_timeout_seconds: int = 300,
+        temporary_directory: Callable[
+            ..., tempfile.TemporaryDirectory[str]
+        ] = tempfile.TemporaryDirectory,
     ) -> None:
         self._audio_pipeline = audio_pipeline
-        self._downloader = downloader or YtDlpAudioDownloader()
+        self._downloader = downloader or YtDlpAudioDownloader(
+            max_file_size_bytes, download_timeout_seconds
+        )
         self._temporary_directory = temporary_directory
 
     async def extract(self, source_url: str) -> ExtractionResult:
-        with self._temporary_directory(prefix="transcript-youtube-") as temporary_directory:
-            audio = await self._downloader.download(source_url, Path(temporary_directory))
+        with self._temporary_directory(
+            prefix="transcript-youtube-"
+        ) as temporary_directory:
+            audio = await self._downloader.download(
+                source_url, Path(temporary_directory)
+            )
             return await self._audio_pipeline.extract(audio)
